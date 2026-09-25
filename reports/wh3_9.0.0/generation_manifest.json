@@ -1,0 +1,19 @@
+{
+  "game_version": "9.0.0.0",
+  "steam_build_id": "25507028",
+  "baseline_pairs": 3330,
+  "current_ca_upgrade_pairs": 3554,
+  "preserved_pairs": 3323,
+  "removed_pairs": 7,
+  "added_pairs": 231,
+  "final_pairs": 3554,
+  "static_pair_graph_exact_match": true,
+  "confidence_counts": {
+    "HIGH": 50,
+    "LOW": 92,
+    "MEDIUM": 89
+  },
+  "new_effect_keys": 147,
+  "unclassified_new_effect_keys": 0,
+  "policy": "stable: preserve surviving legacy scores exactly; score only newly introduced CA upgrade pairs"
+}

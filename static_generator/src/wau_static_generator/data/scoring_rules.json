@@ -1,0 +1,128 @@
+{
+  "format_version": 1,
+  "dominant_chain_categories": {
+    "money": {"category": "Economy", "value": 0.95},
+    "military": {"category": "Military", "value": 0.97},
+    "happiness": {"category": "Control", "value": 0.95},
+    "abandoned": {"category": "Other", "value": 1.0},
+    "": {"category": "Other", "value": 1.0}
+  },
+  "category_floors": {
+    "Growth": 0.25,
+    "Economy": 0.30,
+    "Military": 0.50,
+    "Resource": 0.20,
+    "Support": 0.20,
+    "Control": 0.20,
+    "Defense": 0.40,
+    "Other": 0.50
+  },
+  "metadata_rules": [
+    {
+      "id": "main_settlement_growth",
+      "field": "superchain",
+      "pattern": "main_settlement",
+      "category": "Growth",
+      "fixed": 0.50
+    },
+    {
+      "id": "port_growth",
+      "field": "port_identity",
+      "pattern": ".+",
+      "category": "Growth",
+      "fixed": 0.50
+    }
+  ],
+  "effect_rules": [
+    {
+      "id": "growth",
+      "category": "Growth",
+      "pattern": "(^|_)growth($|_)|development_point|population_surplus",
+      "floor": 0.25,
+      "divisor": 40.0
+    },
+    {
+      "id": "economy_upkeep",
+      "category": "Economy",
+      "pattern": "upkeep",
+      "floor": 0.50,
+      "divisor": 180.0
+    },
+    {
+      "id": "economy",
+      "category": "Economy",
+      "pattern": "economy_gdp|income|trade|construction_cost|construction_time|post_battle_loot|sack|raiding.*income|treasury|recruitment_cost|necromancy_cost",
+      "floor": 0.30,
+      "divisor": 180.0
+    },
+    {
+      "id": "resource_region_production",
+      "category": "Resource",
+      "pattern": "region_resource_.*_production",
+      "floor": 0.20,
+      "divisor": 40.0
+    },
+    {
+      "id": "resource",
+      "category": "Resource",
+      "pattern": "pooled_resource|pooled_resources|shyish_per_turn|fervour_gain|necropolises_count|corpse_transport|convert_.*corpses.*shyish",
+      "floor": 0.20,
+      "divisor": 50.0
+    },
+    {
+      "id": "support",
+      "category": "Support",
+      "pattern": "replenish|campaign_movement|movement_range|research_points|agent_cap|agent_recruitment_xp|agent_rank|winds_of_magic|magic_pool|recruitment_points|recruitment_capacity|healing|casualt|prevent_wounding|saving_chance|thanquol_levels",
+      "floor": 0.20,
+      "divisor": 10.0
+    },
+    {
+      "id": "control",
+      "category": "Control",
+      "pattern": "public_order|corruption|control|loyalty",
+      "floor": 0.20,
+      "divisor": 8.0
+    },
+    {
+      "id": "defense",
+      "category": "Defense",
+      "pattern": "settlement_walls|siege|tower_projectile|supply_points|garrison",
+      "floor": 0.40,
+      "divisor": 5.0
+    },
+    {
+      "id": "military",
+      "category": "Military",
+      "pattern": "unit_cap|unit_allowance|recruitment|recruit_rank|agent_enable_recruitment|force_stat|unit_stat_bonus|ap_damage|physical_resistance|spell_resistance|charge_bonus|army_ability|merc_|experience_base|unit_xp|xp_increase|skill_rank_increase|spawn_army",
+      "floor": 0.50,
+      "divisor": 5.0
+    },
+    {
+      "id": "other_dummy",
+      "category": "Other",
+      "pattern": "dummy",
+      "exclude_pattern": "pooled_resource|construction_slot_multiple_dummy",
+      "fixed": 1.0
+    },
+    {
+      "id": "other_special_mechanics",
+      "category": "Other",
+      "pattern": "plague|concealment|coven_|automatically_create_plagues|add_random_plague_symptom|endgame_create_under_empire|hide_local_own_armies",
+      "fixed": 1.0
+    }
+  ],
+  "recruitable_unit_bonus": {"Military": 0.95},
+  "garrison_bonus": {"Military": 1.0, "Defense": 0.90},
+  "model": {
+    "tfidf_analyzer": "char_wb",
+    "ngram_min": 3,
+    "ngram_max": 5,
+    "min_df": 2,
+    "max_features": 30000,
+    "sublinear_tf": true,
+    "ridge_alpha": 2.0,
+    "neighbors": 5,
+    "ridge_weight": 0.55,
+    "knn_weight": 0.45
+  }
+}

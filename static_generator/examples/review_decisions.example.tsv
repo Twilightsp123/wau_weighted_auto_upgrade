@@ -1,0 +1,3 @@
+pair	action
+example_old>example_new	preserve
+example_other_old>example_other_new	recompute
