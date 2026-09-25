@@ -1,18 +1,30 @@
-# Repository validation
+# Repository Validation
 
-Validated before packaging:
+Validated after bilingual localization packaging refresh.
 
-- Runtime source: `DEBUG_LOG = false`.
-- Persistent `error_log()` retained.
-- Runtime/MCT naming uses `wau_weighted_auto_upgrade`.
-- Pack rebuilt from repository source successfully.
-- Rebuilt pack SHA-256 exactly matches the supplied release pack.
-- Release verifier: PASS.
-- Static baseline graph: 3554 unique pairs, valid score range.
-- Static Generator tests: 5 passed.
-- Public repository contains no CA `db.pack` and no raw CA DB snapshot.
-- Release binaries are present only in local `release/` staging and are excluded by `.gitignore`.
+## Runtime packs
 
-Current release pack SHA-256:
+- English: `release/wau_weighted_auto_upgrade.pack`
+- Simplified Chinese: `release/wau_weighted_auto_upgrade_chinese.pack`
 
-`c2d242b96c35581d728710c000b280862683fc94ceae5d2d7943ba14746c0df5`
+## Results
+
+- Campaign Lua parse: PASS
+- MCT Lua parse: PASS
+- `DEBUG_LOG=false`: PASS
+- Persistent `[ERROR]` logging retained: PASS
+- `manual_local_force=false`: PASS
+- Static pairs: 3554 unique / baseline exact: PASS
+- English MCT localization prefix `mct_wau_weighted_auto_upgrade_*`: PASS
+- Chinese MCT localization prefix `mct_wau_weighted_auto_upgrade_*`: PASS
+- MCT language heuristic (`is_chinese`, `t(en, zh)`): REMOVED
+- English/Chinese localization key sets: identical, 62 keys: PASS
+- English/Chinese common Lua + metadata payloads: byte-identical: PASS
+- Pack entry count: 6 each: PASS
+- Static Generator tests: 5/5 PASS
+- Release verifier English: PASS
+- Release verifier Chinese: PASS
+
+## Release rule
+
+Users should enable only one of the two runtime packs at a time.

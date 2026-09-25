@@ -48,14 +48,17 @@ def latest_baseline():
     return files[-1]
 
 ap=argparse.ArgumentParser(description='Verify the final WAU release pack.')
-ap.add_argument('--pack', default=str(ROOT/'release/wau_weighted_auto_upgrade.pack'))
+ap.add_argument('--language', choices=['english','chinese'], default='english')
+ap.add_argument('--pack', default=None)
 ap.add_argument('--baseline', default=None)
 ap.add_argument('--db-root', default=None)
 a=ap.parse_args()
-pack=Path(a.pack); baseline=Path(a.baseline) if a.baseline else latest_baseline()
+default_pack = ROOT/'release'/('wau_weighted_auto_upgrade_chinese.pack' if a.language=='chinese' else 'wau_weighted_auto_upgrade.pack')
+pack=Path(a.pack) if a.pack else default_pack; baseline=Path(a.baseline) if a.baseline else latest_baseline()
 base=json.loads(baseline.read_text(encoding='utf-8')); expected=set(base['pairs'])
 files=parse_pack(pack)
-required=[r'script\campaign\mod\wau_weighted_auto_upgrade.lua',r'script\mct\settings\wau_weighted_auto_upgrade.lua',r'text\db\wau_weighted_auto_upgrade.loc']
+loc_path = r'text\db\wau_weighted_auto_upgrade_chinese.loc' if a.language=='chinese' else r'text\db\wau_weighted_auto_upgrade.loc'
+required=[r'script\campaign\mod\wau_weighted_auto_upgrade.lua',r'script\mct\settings\wau_weighted_auto_upgrade.lua',loc_path]
 for r in required:
     if r not in files: raise AssertionError(f'missing {r}')
 if any(n.lower().endswith(('.dll','.exe')) for n in files): raise AssertionError('unexpected executable in pack')
@@ -66,6 +69,7 @@ checks={
   'ERROR_LOG_PERSISTENT': re.search(r'local function error_log\([^)]*\).*?\bout\(', main, re.S) is not None,
   'MANUAL_LOCAL_LOCK': 'manual_local_force=false' in main,
   'MCT_KEY': 'register_mod("wau_weighted_auto_upgrade")' in mct,
+  'MCT_LOC_DRIVEN': 'is_chinese' not in mct and 'local function t(' not in mct and 'mct_wau_weighted_auto_upgrade_' in mct,
 }
 for k,v in checks.items():
     if not v: raise AssertionError(k)

@@ -71,10 +71,11 @@ WH3 9.0 compatibility update.
 
 ```text
 release/wau_weighted_auto_upgrade.pack
+release/wau_weighted_auto_upgrade_chinese.pack
 release/wau_static_generator-1.0.0-py3-none-any.whl   (可选)
 ```
 
-普通玩家真正需要的只有 `.pack`。`.whl` 是给想直接安装 Static Generator 的维护者。
+普通玩家只需要选择一个语言 `.pack`；不要同时启用英文版和中文版。`.whl` 是给想直接安装 Static Generator 的维护者。
 
 8. 点击 **Publish release**。
 
@@ -97,13 +98,15 @@ git push
 5. 构建并验证：
 
 ```powershell
-python tools/build_pack.py
-python tools/verify_release.py
+python tools/build_pack.py --language english
+python tools/build_pack.py --language chinese
+python tools/verify_release.py --language english
+python tools/verify_release.py --language chinese
 ```
 
 6. 提交并 push。
 7. 打新的 tag，例如 `v0.7.1`。
-8. GitHub → Releases → Draft a new release → 选择新 tag → 上传新的 `wau_weighted_auto_upgrade.pack`。
+8. GitHub → Releases → Draft a new release → 选择新 tag → 上传新的英文与简体中文两个 `.pack`。
 
 ## G. 新版 WH3 DB 导出
 
@@ -113,3 +116,13 @@ python tools/verify_release.py
 - `docs/DB_EXPORT_GUIDE.md`
 
 不要把 CA 原始 TSV、`db.pack` 或完整 CA database snapshot 提交到 GitHub。仓库只保存我们自己的 baseline、规则、diff 和审核报告。
+
+
+## 双语言 Release 文件
+
+每个 Release 上传两个可选的 Mod 成品：
+
+- `wau_weighted_auto_upgrade.pack`：英文版
+- `wau_weighted_auto_upgrade_chinese.pack`：简体中文版
+
+两个 pack 不要同时启用。中文版只增加 `_chinese` 文件名后缀，内部功能与英文版一致。
