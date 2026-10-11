@@ -23,7 +23,8 @@ Download exactly one runtime pack from the latest GitHub Release:
 
 ## Current release
 
-- WAU: `0.7.0`
+- Source in `main`: `0.7.2` candidate (partial in-game verification)
+- Previous published release binaries: `0.7.0` (no new GitHub Release binary published by the source commit)
 - Target DB baseline: WH3 `9.0.0.0` / Steam build `25507028`
 - Normal runtime debug log: OFF
 - Error log: retained
@@ -69,3 +70,7 @@ Build them with:
 python tools/build_pack.py --language english
 python tools/build_pack.py --language chinese
 ```
+
+## v0.7.2 maintenance
+
+See [the repair notes](docs/V071_V072_REPAIRS.zh-CN.md) and [the game-log audit](reports/wh3_9.0.0/V072_IN_GAME_EVIDENCE_2026-10-11.md). End-turn construction now starts at `FactionAboutToEndTurn`; next-turn model audit confirms or rejects previously unconfirmed orders. The recorded `accepted=2` is partial evidence, not a complete in-game release gate.

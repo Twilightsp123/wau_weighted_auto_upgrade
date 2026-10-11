@@ -3559,9 +3559,10 @@ local WAU_STATIC = {
 -- Fresh implementation based only on verified WH3 primitives. Singleplayer only.
 
 local WAU = {
-    VERSION = "0.7.0",
+    VERSION = "0.7.2",
     SAVE_AUTO = "wau_auto_states_v2",
     SAVE_KNOWN = "wau_known_settlements_v1",
+    SAVE_PENDING = "wau_end_turn_pending_v1",
     MOD_KEY = "wau_weighted_auto_upgrade",
     CATEGORIES = {"Primary", "Growth", "Economy", "Port", "Military", "Resource", "Support", "Control", "Defense", "Other"},
     defaults = {
@@ -3595,7 +3596,9 @@ local WAU = {
     ui_status = nil,
     planner_job = nil,
     next_job_id = 0,
-    dispatch_status = {}
+    dispatch_status = {},
+    pending_end_orders = {},
+    end_turn_invoked = false
 }
 
 -- Diagnostic RC: intentionally ON so every modified execution path can be audited.
@@ -3640,28 +3643,57 @@ local function command(settlement_cqi, expression)
     return ok, err
 end
 
-local function get_cco_slot_index(settlement_cqi, current_key, preferred_index)
-    if not current_key then return nil end
-    local size = q(settlement_cqi, "BuildingSlotList.Size")
-    if type(size) ~= "number" or size <= 0 then return nil end
+-- Resolve the entire settlement at once. Matching a building key alone cannot
+-- identify individual slots when a compatible mod permits duplicate buildings.
+-- Prefer matching indices, then allocate each remaining CCO slot at most once.
+local function build_cco_slot_map(settlement, settlement_cqi)
+    local result, used = {}, {}
+    local native_slots = settlement:slot_list()
+    local native_count = native_slots:num_items()
+    local cco_count = q(settlement_cqi, "BuildingSlotList.Size")
+    if type(cco_count) ~= "number" or cco_count <= 0 then return result end
 
-    if type(preferred_index) == "number" and preferred_index >= 0 and preferred_index < size then
-        local preferred_key = q(settlement_cqi, "BuildingSlotList.At(" .. preferred_index .. ").BuildingContext.BuildingLevelRecordContext.Key")
-        if preferred_key == current_key then
-            return preferred_index
+    local cco_keys = {}
+    for idx = 0, cco_count - 1 do
+        cco_keys[idx] = q(settlement_cqi,
+            "BuildingSlotList.At(" .. idx .. ").BuildingContext.BuildingLevelRecordContext.Key")
+    end
+
+    local native_keys = {}
+    for idx = 0, native_count - 1 do
+        local slot = native_slots:item_at(idx)
+        if slot and not slot:is_null_interface() and slot:has_building() then
+            local building = slot:building()
+            if building and not building:is_null_interface() then
+                native_keys[idx] = building:name()
+            end
+        end
+        if native_keys[idx] and native_keys[idx] == cco_keys[idx] then
+            result[idx] = idx
+            used[idx] = true
         end
     end
 
-    for i = 0, size - 1 do
-        local cco_key = q(settlement_cqi, "BuildingSlotList.At(" .. i .. ").BuildingContext.BuildingLevelRecordContext.Key")
-        if cco_key == current_key then
-            log("[SLOT_MAP_FALLBACK] settlement_cqi=" .. tostring(settlement_cqi)
-                .. " preferred=" .. tostring(preferred_index) .. " resolved=" .. tostring(i)
-                .. " key=" .. tostring(current_key))
-            return i
+    for idx = 0, native_count - 1 do
+        local key = native_keys[idx]
+        if key and result[idx] == nil then
+            for cco_idx = 0, cco_count - 1 do
+                if not used[cco_idx] and cco_keys[cco_idx] == key then
+                    result[idx] = cco_idx
+                    used[cco_idx] = true
+                    log("[SLOT_MAP_REASSIGN] cqi=" .. tostring(settlement_cqi)
+                        .. " native=" .. tostring(idx) .. " cco=" .. tostring(cco_idx)
+                        .. " key=" .. tostring(key))
+                    break
+                end
+            end
+            if result[idx] == nil then
+                error_log("SLOT_MAP_UNRESOLVED", "cqi=" .. tostring(settlement_cqi)
+                    .. " native=" .. tostring(idx) .. " key=" .. tostring(key))
+            end
         end
     end
-    return nil
+    return result
 end
 
 local function slot_expr(cco_idx, suffix)
@@ -3758,6 +3790,8 @@ local function load_state()
     if type(saved_auto) == "table" then WAU.auto_states = saved_auto end
     local saved_known = cm:get_saved_value(WAU.SAVE_KNOWN)
     if type(saved_known) == "table" then WAU.known_settlements = saved_known end
+    local saved_pending = cm:get_saved_value(WAU.SAVE_PENDING)
+    if type(saved_pending) == "table" then WAU.pending_end_orders = saved_pending end
     WAU.player_faction_key = cm:get_local_faction_name()
     WAU.auto_states[WAU.player_faction_key] = WAU.auto_states[WAU.player_faction_key] or {}
     local had_known_baseline = type(WAU.known_settlements[WAU.player_faction_key]) == "table"
@@ -4319,6 +4353,14 @@ local function find_current_target_index(candidate)
     return nil
 end
 
+local function construct_cco_level(settlement_cqi, cco_idx, target_key)
+    local slot_cco = common.get_context_value("CcoCampaignSettlement",
+        tostring(settlement_cqi), "BuildingSlotList.At(" .. tostring(cco_idx) .. ")")
+    if not slot_cco then error("slot_cco=nil") end
+    slot_cco:Call("Construct(DatabaseRecordContext(\"CcoBuildingLevelRecord\",\""
+        .. target_key .. "\"))")
+end
+
 local function execute_candidate(candidate, job)
     if not candidate or type(candidate) ~= "table" then
         error_log("INVALID_CANDIDATE", "job=" .. tostring(job and job.id))
@@ -4352,8 +4394,11 @@ local function execute_candidate(candidate, job)
         return false, nil
     end
 
-    local cco_idx = get_cco_slot_index(live_cqi, candidate.current_key, candidate.slot_index)
-    if cco_idx == nil then
+    -- Never re-find a duplicate by name: use the unique slot chosen by the
+    -- settlement-wide 1:1 map during planning.
+    local cco_idx = candidate.cco_idx
+    if type(cco_idx) ~= "number" or cco_idx < 0
+        or cco_idx >= (q(live_cqi, "BuildingSlotList.Size") or 0) then
         error_log("SLOT_MAP_FAIL", "job=" .. tostring(job and job.id) .. " cqi=" .. live_cqi
             .. " slot=" .. tostring(candidate.slot_index) .. " current=" .. tostring(candidate.current_key))
         return false, nil
@@ -4363,6 +4408,14 @@ local function execute_candidate(candidate, job)
         error_log("CURRENT_KEY_DRIFT", "job=" .. tostring(job and job.id) .. " region=" .. candidate.region_key
             .. " slot=" .. tostring(candidate.slot_index) .. " expected=" .. tostring(candidate.current_key)
             .. " live=" .. tostring(q(live_cqi, current_level_expr(cco_idx) .. ".Key")))
+        return false, nil
+    end
+
+    local live_uid = q(live_cqi, slot_expr(cco_idx, "BuildingContext.UniqueId"))
+    if candidate.building_uid ~= nil and live_uid ~= candidate.building_uid then
+        error_log("BUILDING_ID_DRIFT", "job=" .. tostring(job and job.id)
+            .. " region=" .. candidate.region_key .. " slot=" .. tostring(candidate.slot_index)
+            .. " expected=" .. tostring(candidate.building_uid) .. " actual=" .. tostring(live_uid))
         return false, nil
     end
 
@@ -4399,7 +4452,10 @@ local function execute_candidate(candidate, job)
     local faction = cm:get_local_faction()
     local treasury = faction and not faction:is_null_interface() and faction:treasury() or 0
     local reserve = job and job.settings and job.settings.reserve_treasury or 0
-    if treasury - actual_cost < reserve then
+    -- The model may defer treasury deductions until the end of this event.
+    -- Reserve money for all submitted but not yet reflected constructions.
+    local unreflected = job and job.synchronous_end_turn and (job.reserved_unconfirmed or 0) or 0
+    if treasury - unreflected - actual_cost < reserve then
         log("[EXEC_SKIP_TREASURY] job=" .. tostring(job and job.id) .. " treasury=" .. tostring(treasury)
             .. " cost=" .. tostring(actual_cost) .. " reserve=" .. tostring(reserve)
             .. " target=" .. candidate.target_key)
@@ -4411,7 +4467,15 @@ local function execute_candidate(candidate, job)
     local event_string = "WAU_Construct__" .. tostring(job_id) .. "__" .. tostring(plan_index)
         .. "__" .. tostring(live_cqi) .. "__" .. tostring(cco_idx) .. "__" .. candidate.target_key
     WAU.dispatch_status[event_string] = "pending"
-    local ok, err = pcall(function() CampaignUI.TriggerCampaignScriptEvent(0, event_string) end)
+    local ok, err
+    if job and job.synchronous_end_turn then
+        -- AboutToEndTurn is earlier than FactionTurnEnd. Never queue this
+        -- command for the following faction's turn.
+        ok, err = pcall(construct_cco_level, live_cqi, cco_idx, candidate.target_key)
+        WAU.dispatch_status[event_string] = ok and "ok" or "fail"
+    else
+        ok, err = pcall(function() CampaignUI.TriggerCampaignScriptEvent(0, event_string) end)
+    end
     if not ok then
         WAU.dispatch_status[event_string] = "fail"
         error_log("UITRIGGER_SEND_FAIL", "job=" .. tostring(job_id) .. " idx=" .. tostring(plan_index)
@@ -4434,6 +4498,42 @@ local function construction_confirmed(candidate)
     return false, "unchanged"
 end
 
+-- Audit an unconfirmed end-turn submission on the next active player turn.
+-- A successful Lua/CCO Call is *not* proof of successful construction.
+local function audit_pending_end_orders()
+    local records = WAU.pending_end_orders
+    if type(records) ~= "table" or #records == 0 then return end
+    local confirmed, failed, invalid = 0, 0, 0
+    for _, record in ipairs(records) do
+        local region = cm:get_region(record.region_key)
+        if not region or region:is_null_interface() or
+            region:owning_faction():name() ~= record.faction_key then
+            invalid = invalid + 1
+        else
+            local settlement = region:settlement()
+            local live_cqi = settlement and not settlement:is_null_interface()
+                and safe_call(function() return settlement:cqi() end, nil) or nil
+            local candidate = {
+                settlement_cqi = live_cqi,
+                cco_idx = record.cco_idx,
+                target_key = record.target_key
+            }
+            if live_cqi == record.settlement_cqi and construction_confirmed(candidate) then
+                confirmed = confirmed + 1
+            else
+                failed = failed + 1
+                error_log("END_TURN_NOT_ACCEPTED", "region=" .. tostring(record.region_key)
+                    .. " slot=" .. tostring(record.slot_index) .. " target=" .. tostring(record.target_key)
+                    .. " next_turn_state=unchanged_or_unavailable")
+            end
+        end
+    end
+    WAU.pending_end_orders = {}
+    cm:set_saved_value(WAU.SAVE_PENDING, WAU.pending_end_orders)
+    out(LOG_PREFIX .. ": [END_TURN_AUDIT] accepted=" .. confirmed
+        .. " not_accepted=" .. failed .. " ownership_changed=" .. invalid)
+end
+
 local planner_step_impl
 
 local function set_ui_status(text)
@@ -4448,6 +4548,20 @@ local function finish_planner_job(job, error_message)
         log("[JOB_DONE] job=" .. tostring(job.id) .. " reason=" .. tostring(job.reason)
             .. " candidates=" .. #job.candidates .. " accepted=" .. #(job.plan or {})
             .. " issued=" .. tostring(job.issued or 0) .. " confirmed=" .. tostring(job.confirmed or 0)
+            .. " failed=" .. tostring(job.failed or 0)
+            .. " pending_next_turn=" .. tostring(#(job.pending_end_orders or {})))
+    end
+    if job and job.synchronous_end_turn then
+        local pending = job.pending_end_orders or {}
+        for _, order in ipairs(pending) do
+            WAU.pending_end_orders[#WAU.pending_end_orders + 1] = order
+        end
+        if #pending > 0 then
+            cm:set_saved_value(WAU.SAVE_PENDING, WAU.pending_end_orders)
+        end
+        out(LOG_PREFIX .. ": [PRE_END_SUMMARY] issued=" .. tostring(job.issued or 0)
+            .. " immediately_confirmed=" .. tostring(job.confirmed or 0)
+            .. " pending_audit=" .. tostring(#pending)
             .. " failed=" .. tostring(job.failed or 0))
     end
     WAU.dispatch_status = {}
@@ -4462,7 +4576,9 @@ local function schedule_planner_step()
     if scheduled_job then scheduled_job.next_delay = nil end
     cm:callback(function()
         local job = WAU.planner_job
-        if not job then return end
+        -- A stale callback from a previously drained job must never step a
+        -- different job created after the end-turn event.
+        if not job or job ~= scheduled_job then return end
         local steps = 200
         while steps > 0 do
             local ok, finished = pcall(function() return planner_step_impl(job) end)
@@ -4480,7 +4596,7 @@ local function schedule_planner_step()
     end, delay)
 end
 
-local function slot_is_eligible_native(region_key, slot_index)
+local function slot_is_eligible_native(region_key, slot_index, mapped_cco_idx)
     local region = cm:get_region(region_key)
     if not region or region:is_null_interface() then return false, nil, nil, false, false, "invalid_region", nil end
     local settlement = region:settlement()
@@ -4495,8 +4611,11 @@ local function slot_is_eligible_native(region_key, slot_index)
 
     local current_key = building:name()
     local sett_cqi = settlement:cqi()
-    local cco_idx = get_cco_slot_index(sett_cqi, current_key, slot_index)
-    if cco_idx == nil then return false, 0, nil, false, false, "empty_or_unknown", nil end
+    local cco_idx = mapped_cco_idx
+    if type(cco_idx) ~= "number" or
+        q(sett_cqi, current_level_expr(cco_idx) .. ".Key") ~= current_key then
+        return false, 0, nil, false, false, "cco_slot_unmapped", nil
+    end
 
     local current_level = q(sett_cqi, current_level_expr(cco_idx) .. ".Level")
     if type(current_level) ~= "number" then current_level = -1 end
@@ -4522,7 +4641,7 @@ end
 
 local function rejection_summary(job)
     local order = {
-        "no_building", "empty_or_unknown", "current_level_below_one", "current_key_unknown", "inactive", "building_new",
+        "no_building", "empty_or_unknown", "cco_slot_unmapped", "current_level_below_one", "current_key_unknown", "inactive", "building_new",
         "already_upgrading", "converting", "repairing", "dismantling", "damaged", "cannot_upgrade", "cannot_build_now",
         "no_upgrade_without_conversion", "invalid_target", "branch_choice_skipped", "not_level_increase", "minor_primary_gate", "invalid_cost"
     }
@@ -4539,8 +4658,11 @@ local function scan_one_target(job, settlement, active_slot)
     local settlement_cqi = settlement.settlement_cqi
     local slot_index = active_slot.slot_index
     local cco_idx = active_slot.cco_idx
-    if not cco_idx then
-        cco_idx = get_cco_slot_index(settlement_cqi, active_slot.current_key, active_slot.slot_index) or active_slot.slot_index or 0
+    if cco_idx == nil then
+        record_rejection(job, "cco_slot_unmapped", settlement, slot_index,
+            active_slot.target_index, nil)
+        active_slot.target_index = active_slot.target_index + 1
+        return
     end
     local target_index = active_slot.target_index
     active_slot.target_index = target_index + 1
@@ -4594,6 +4716,7 @@ local function scan_one_target(job, settlement, active_slot)
         settlement_cqi = settlement_cqi,
         slot_index = slot_index,
         cco_idx = cco_idx,
+        building_uid = active_slot.building_uid,
         target_index = target_index,
         current_key = active_slot.current_key,
         target_key = target_key,
@@ -4619,7 +4742,7 @@ local function finish_candidate_scan(job)
     local starting_treasury = faction:treasury()
     local treasury = math.max(0, starting_treasury - job.settings.reserve_treasury)
     local slots_used, accepted = {}, {}
-    local excluded = {duplicate_slot = 0, treasury = 0}
+    local excluded = {duplicate_slot = 0, treasury = 0, in_flight = 0}
 
     for _, candidate in ipairs(candidates) do
         local slot_key = candidate.region_key .. ":" .. candidate.slot_index
@@ -4646,7 +4769,8 @@ local function finish_candidate_scan(job)
         .. " rejections={" .. rejection_summary(job) .. "}")
     log("[BUDGET] job=" .. tostring(job.id) .. " treasury=" .. tostring(starting_treasury)
         .. " reserve=" .. tostring(job.settings.reserve_treasury) .. " spendable_after_plan=" .. tostring(treasury)
-        .. " excluded={duplicate_slot=" .. excluded.duplicate_slot .. ",treasury=" .. excluded.treasury .. "}")
+        .. " excluded={duplicate_slot=" .. excluded.duplicate_slot .. ",treasury=" .. excluded.treasury
+        .. ",in_flight=" .. excluded.in_flight .. "}")
     for idx, candidate in ipairs(accepted) do
         log(string.format("[PLAN_ACCEPT] job=%d idx=%d/%d score=%.3f region=%s slot=%d cco=%d %s>%s cost=%d",
             job.id, idx, #accepted, candidate.final_score or 0, candidate.region_key, candidate.slot_index,
@@ -4689,6 +4813,27 @@ planner_step_impl = function(job)
                 return false
             end
 
+            if job.synchronous_end_turn then
+                -- At this point no model evidence exists. Do not count it as
+                -- accepted. Preserve it for a next-turn model audit.
+                job.pending_end_orders = job.pending_end_orders or {}
+                job.pending_end_orders[#job.pending_end_orders + 1] = {
+                    faction_key = candidate.faction_key,
+                    region_key = candidate.region_key,
+                    settlement_cqi = candidate.settlement_cqi,
+                    slot_index = candidate.slot_index,
+                    cco_idx = candidate.cco_idx,
+                    target_key = candidate.target_key
+                }
+                job.reserved_unconfirmed = (job.reserved_unconfirmed or 0) + (candidate.create_cost or 0)
+                log("[PRE_END_AWAIT_MODEL] job=" .. tostring(job.id)
+                    .. " region=" .. candidate.region_key .. " slot=" .. tostring(candidate.slot_index))
+                WAU.dispatch_status[job.awaiting.event_string] = nil
+                job.awaiting = nil
+                job.execute_index = job.execute_index + 1
+                return false
+            end
+
             job.awaiting.attempt = job.awaiting.attempt + 1
             if job.awaiting.attempt >= 6 then
                 error_log("CONFIRM_FAIL", "job=" .. tostring(job.id) .. " idx=" .. tostring(job.execute_index)
@@ -4719,6 +4864,8 @@ planner_step_impl = function(job)
             return false
         end
         job.issued = job.issued + 1
+        job.issued_slots = job.issued_slots or {}
+        job.issued_slots[candidate.region_key .. ":" .. candidate.slot_index] = true
         job.awaiting = {event_string = event_string, attempt = 0}
         job.next_delay = 0.10
         return false
@@ -4736,6 +4883,7 @@ planner_step_impl = function(job)
             local sett_obj = region:settlement()
             if sett_obj and not sett_obj:is_null_interface() then
                 settlement.slot_count = sett_obj:slot_list():num_items()
+                settlement.slot_map = build_cco_slot_map(sett_obj, settlement.settlement_cqi)
                 settlement.is_capital = region:is_province_capital()
             end
         end
@@ -4765,7 +4913,8 @@ planner_step_impl = function(job)
         return false
     end
 
-    local eligible, current_level, current_key, is_primary, is_port, rejection, cco_idx, current_chain = slot_is_eligible_native(settlement.region_key, job.slot_index)
+    local eligible, current_level, current_key, is_primary, is_port, rejection, cco_idx, current_chain = slot_is_eligible_native(
+        settlement.region_key, job.slot_index, settlement.slot_map and settlement.slot_map[job.slot_index])
     if not eligible then
         record_rejection(job, rejection or "unknown_slot", settlement, job.slot_index, nil, nil)
         job.slot_index = job.slot_index + 1
@@ -4789,16 +4938,48 @@ planner_step_impl = function(job)
     end
     job.active_slot = {
         slot_index = job.slot_index, cco_idx = cco_idx, current_level = current_level, current_key = current_key,
+        building_uid = q(settlement.settlement_cqi, slot_expr(cco_idx, "BuildingContext.UniqueId")),
         current_chain = current_chain, is_primary = is_primary, is_port = is_port,
         target_count = target_count, same_chain_count = same_chain_count, target_index = 0
     }
     return false
 end
 
+local function drain_end_turn_job()
+    local job = WAU.planner_job
+    if not job then return end
+    job.synchronous_end_turn = true
+    local step_count = 0
+    -- AboutToEndTurn: do not defer a construction command to the next faction.
+    while WAU.planner_job == job do
+        step_count = step_count + 1
+        if step_count > 1000000 then
+            finish_planner_job(job, "end-turn synchronous step limit exceeded")
+            return
+        end
+        local ok, finished = pcall(planner_step_impl, job)
+        if not ok then
+            finish_planner_job(job, finished)
+            return
+        end
+        if finished then
+            finish_planner_job(job, nil)
+            return
+        end
+    end
+end
+
 local function run_planner(reason, target_region_key)
     if not WAU.model_ready then return end
     if WAU.planner_running then
-        log("[REENTRY_BLOCK] reason=" .. tostring(reason) .. " active_job=" .. tostring(WAU.planner_job and WAU.planner_job.id))
+        -- A previous UITrigger may still be queued. Draining it synchronously
+        -- would incorrectly treat the undispatched order as completed.
+        if reason == "turn_end" then
+            error_log("PRE_END_BUSY", "existing_job=" .. tostring(WAU.planner_job and WAU.planner_job.id)
+                .. " cannot safely replace an in-flight execution")
+        else
+            log("[REENTRY_BLOCK] reason=" .. tostring(reason) .. " active_job=" .. tostring(WAU.planner_job and WAU.planner_job.id))
+        end
         return
     end
     if safe_call(function() return cm:is_multiplayer() end, false) then
@@ -4809,9 +4990,15 @@ local function run_planner(reason, target_region_key)
     local faction = cm:get_local_faction()
     if not faction or faction:is_null_interface() then return end
     local faction_key = faction:name()
+    if not safe_call(function() return faction:is_factions_turn() end, false) then
+        if reason == "turn_end" then
+            error_log("PRE_END_NOT_ACTIVE", "not in player's active turn; refusing model writes")
+        end
+        return
+    end
     local settings = read_settings()
 
-    if target_region_key and get_auto_state(faction_key, target_region_key, false) ~= true then
+    if target_region_key and get_auto_state(faction_key, target_region_key, true) ~= true then
         log("[LOCK_SKIP] reason=" .. tostring(reason) .. " target_region=" .. tostring(target_region_key) .. " AUTO=OFF")
         return
     end
@@ -4823,7 +5010,9 @@ local function run_planner(reason, target_region_key)
         local region = region_list:item_at(region_index)
         if not region:is_null_interface() then
             local region_key = region:name()
-            local allowed = get_auto_state(faction_key, region_key, false) == true
+            -- Ownership is proven by faction:region_list(); initialize without
+            -- requiring SettlementSelected or an open settlement panel.
+            local allowed = get_auto_state(faction_key, region_key, true) == true
             if target_region_key then allowed = allowed and (region_key == target_region_key) end
             if allowed then
                 local sett_obj = region:settlement()
@@ -4853,6 +5042,7 @@ local function run_planner(reason, target_region_key)
         faction_key = faction_key,
         settings = settings,
         settlements = settlements,
+        issued_slots = {},
         settlement_index = 1,
         slot_index = 0,
         stage = "scan",
@@ -4886,7 +5076,11 @@ local function run_planner(reason, target_region_key)
         .. ",Control=" .. tostring(settings.weight_control)
         .. ",Defense=" .. tostring(settings.weight_defense)
         .. ",Other=" .. tostring(settings.weight_other) .. "}")
-    schedule_planner_step()
+    if reason == "turn_end" then
+        drain_end_turn_job()
+    else
+        schedule_planner_step()
+    end
 end
 
 log("[BOOT] script loaded version=" .. WAU.VERSION .. " static_pairs=3554 debug=" .. tostring(DEBUG_LOG))
@@ -5026,13 +5220,31 @@ core:add_listener(
 )
 
 core:add_listener(
-    "WauFactionTurnEnd",
-    "FactionTurnEnd",
+    "WauFactionAboutToEndTurn",
+    "FactionAboutToEndTurn",
     function(context)
         return WAU.model_ready and context:faction():name() == WAU.player_faction_key
             and read_settings().trigger_timing == "turn_end"
     end,
-    function() run_planner("turn_end") end,
+    function()
+        if WAU.end_turn_invoked then return end
+        WAU.end_turn_invoked = true
+        run_planner("turn_end")
+    end,
+    true
+)
+
+-- Always audit pending work, even when MCT was switched to manual or start.
+core:add_listener(
+    "WauEndTurnAudit",
+    "FactionTurnStart",
+    function(context)
+        return WAU.model_ready and context:faction():name() == WAU.player_faction_key
+    end,
+    function()
+        WAU.end_turn_invoked = false
+        audit_pending_end_orders()
+    end,
     true
 )
 
@@ -5051,12 +5263,16 @@ core:add_listener(
             error_log("UITRIGGER_MALFORMED", "event=" .. tostring(trigger_str))
             return
         end
-        local ok, err = pcall(function()
-            local expr = "BuildingSlotList.At(" .. cco_idx_str .. ")"
-            local slot_cco = common.get_context_value("CcoCampaignSettlement", settlement_cqi, expr)
-            if not slot_cco then error("slot_cco=nil") end
-            slot_cco:Call("Construct(DatabaseRecordContext(\"CcoBuildingLevelRecord\",\"" .. target_key .. "\"))")
-        end)
+        local faction = cm:get_local_faction()
+        if not WAU.planner_job or tostring(WAU.planner_job.id) ~= job_id
+            or not faction or faction:is_null_interface()
+            or not safe_call(function() return faction:is_factions_turn() end, false) then
+            WAU.dispatch_status[trigger_str] = "fail"
+            error_log("UITRIGGER_STALE_OR_TURN_ENDED", "job=" .. tostring(job_id)
+                .. " event=" .. tostring(trigger_str))
+            return
+        end
+        local ok, err = pcall(construct_cco_level, settlement_cqi, tonumber(cco_idx_str), target_key)
         if ok then
             WAU.dispatch_status[trigger_str] = "ok"
             log("[UITRIGGER_OK] job=" .. job_id .. " idx=" .. plan_idx .. " cqi=" .. settlement_cqi

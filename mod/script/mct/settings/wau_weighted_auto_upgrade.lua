@@ -6,7 +6,7 @@ local mct = get_mct()
 local mod = mct:register_mod("wau_weighted_auto_upgrade")
 
 mod:set_author("WAU Project")
-mod:set_version(1, "0.7.0")
+mod:set_version(1, "0.7.2")
 
 local function loc(key)
     local value = common.get_localised_string(key)

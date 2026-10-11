@@ -85,3 +85,15 @@ Search the complete log for:
 - `INVALID_EXEC_COST`
 
 Any hit should be returned with the full log, not just the matching line.
+
+## v0.7.2 additional regression checks
+
+- `trigger_timing=turn_end`: verify `FactionAboutToEndTurn`, `PRE_END_SUMMARY`, then the next player's `END_TURN_AUDIT`. `FactionTurnEnd` must not start another build run.
+- If a `Construct` call is silently rejected, the next turn must report `END_TURN_NOT_ACCEPTED`, never success solely from `pcall`.
+- Capture progress ticks before and after the turn transition; accepted next-turn construction is not enough to show it got this turn's progress.
+- Occupy a settlement and do not select it; confirm its AUTO default is initialized while established cities preserve prior OFF or saved overrides.
+- Put two identical buildings in different slots and confirm distinct CCO indexes; no same-slot double construction.
+- Reentry and stale UITrigger events must never submit orders after losing the active player turn.
+- Recheck treasury reserves with two or more synchronous orders.
+
+Observed partial evidence: campaign log 2026-10-11 line 8322: `accepted=2 not_accepted=0 ownership_changed=0`. This does not pass all cases above.

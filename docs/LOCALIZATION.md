@@ -33,3 +33,7 @@ Campaign UI strings use the `wau_ui_*` keys and are present in both language fil
 - Simplified Chinese: `mod/text/db/wau_weighted_auto_upgrade_chinese.loc`
 
 Do not load both runtime packs together.
+
+## v0.7.2 Chinese text refresh
+
+The English and Simplified Chinese LOC key sets remain identical (62 each). Chinese descriptions clarify the pre-end timing, next-turn audit for unconfirmed orders, and default AUTO initialization of newly occupied settlements without prior selection. The Lua runtime and the MCT registration key remain language-independent.
